@@ -710,8 +710,18 @@ def deploy_python(app, deltas={}):
     exec(open(activation_script).read(), dict(__file__=activation_script))
 
     if first_time or getmtime(requirements) > getmtime(virtualenv_path):
-        echo("-----> Running pip for '{}'".format(app), fg='green')
-        call('pip install -r {}'.format(requirements), cwd=virtualenv_path, shell=True)
+        # Check for uv.lock file to determine if uv should be used
+        uv_lock = join(APP_ROOT, app, 'uv.lock')
+        if exists(uv_lock):
+            echo("-----> Detected uv.lock, using uv for '{}'".format(app), fg='green')
+            if not which('uv'):
+                echo("-----> Installing uv package installer", fg='yellow')
+                call('pip install uv', cwd=virtualenv_path, shell=True)
+            # Use uv sync which is designed for CI/production environments
+            call('uv sync', cwd=join(APP_ROOT, app), env=dict(environ, VIRTUAL_ENV=virtualenv_path, PATH=env['PATH']), shell=True)
+        else:
+            echo("-----> Running pip for '{}'".format(app), fg='green')
+            call('pip install -r {}'.format(requirements), cwd=virtualenv_path, shell=True)
     return spawn_app(app, deltas)
 
 

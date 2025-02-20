@@ -10,6 +10,10 @@ You can configure deployment settings by placing special variables in an `ENV` f
 
 * `PYTHON_VERSION` (int): Forces Python 3
 
+Piku automatically detects the package installer to use:
+- Uses `pip` by default with requirements.txt
+- Uses `uv` when a `uv.lock` file is present in the project root (provides faster dependency installation)
+
 ### Node
 
 * `NODE_VERSION`: installs a particular version of node for your app if `nodeenv` is found on the path. Optional; if not specified, the system-wide node  package is used.
