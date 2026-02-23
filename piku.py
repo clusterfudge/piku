@@ -18,7 +18,7 @@ from os import chmod, getgid, getuid, symlink, unlink, remove, stat, listdir, en
 from os.path import abspath, basename, dirname, exists, getmtime, join, realpath, splitext, isdir
 from pwd import getpwuid
 from grp import getgrgid
-from re import sub, match
+from re import sub, match, search as re_search
 from shlex import split as shsplit
 from shutil import copyfile, rmtree, which
 from socket import socket, AF_INET, SOCK_STREAM
@@ -113,6 +113,7 @@ $PIKU_INTERNAL_NGINX_COMMON
 NGINX_COMMON_FRAGMENT = r"""
   listen              $NGINX_IPV6_ADDRESS:$NGINX_SSL;
   listen              $NGINX_IPV4_ADDRESS:$NGINX_SSL;
+  $PIKU_INTERNAL_NGINX_HTTP2_SETTING
   ssl_certificate     $NGINX_ROOT/$APP.crt;
   ssl_certificate_key $NGINX_ROOT/$APP.key;
   server_name         $NGINX_SERVER_NAME;
@@ -866,8 +867,22 @@ def spawn_app(app, deltas={}):
 
             nginx = command_output("nginx -V")
             nginx_ssl = "443 ssl"
+            nginx_http2 = ""
             if "--with-http_v2_module" in nginx:
-                nginx_ssl += " http2"
+                # nginx >= 1.25.1 deprecated "listen ... http2" in favor of "http2 on;"
+                nginx_version = command_output("nginx -v") or ""
+                try:
+                    version_match = re_search(r'nginx/(\d+)\.(\d+)\.(\d+)', nginx_version)
+                    if version_match:
+                        major, minor, patch = int(version_match.group(1)), int(version_match.group(2)), int(version_match.group(3))
+                        if (major, minor, patch) >= (1, 25, 1):
+                            nginx_http2 = "http2 on;"
+                        else:
+                            nginx_ssl += " http2"
+                    else:
+                        nginx_ssl += " http2"
+                except Exception:
+                    nginx_ssl += " http2"
             elif "--with-http_spdy_module" in nginx and "nginx/1.6.2" not in nginx:  # avoid Raspbian bug
                 nginx_ssl += " spdy"
             nginx_conf = join(NGINX_ROOT, "{}.conf".format(app))
@@ -876,6 +891,7 @@ def spawn_app(app, deltas={}):
                 'NGINX_SSL': nginx_ssl,
                 'NGINX_ROOT': NGINX_ROOT,
                 'ACME_WWW': ACME_WWW,
+                'PIKU_INTERNAL_NGINX_HTTP2_SETTING': nginx_http2,
             })
 
             # default to reverse proxying to the TCP port we picked
@@ -1077,7 +1093,7 @@ def spawn_app(app, deltas={}):
                 h.write(buffer)
             # prevent broken config from breaking other deploys
             try:
-                nginx_config_test = str(check_output(r"nginx -t 2>&1 | grep -E '{}\.conf:[0-9]+$'".format(app), env=environ, shell=True))
+                nginx_config_test = str(check_output(r"nginx -t 2>&1 | grep -E '\[(emerg|error)\].*{}\.conf:[0-9]+$'".format(app), env=environ, shell=True))
             except Exception:
                 nginx_config_test = None
             if nginx_config_test:
