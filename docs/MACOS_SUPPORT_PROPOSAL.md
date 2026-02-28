@@ -268,7 +268,60 @@ Replace `uwsgi-piku.dist` (SysVinit format) with platform-specific alternatives:
 - **Linux:** Keep existing systemd units (preferred) or init script
 - **macOS:** New launchd plists
 
-### 6. Shell Script Portability
+### 6. Gunicorn Support (Alternative to uwsgi)
+
+Since uwsgi can be difficult to install on macOS, add gunicorn as an alternative WSGI server:
+
+**Configuration option:**
+```bash
+# In app ENV file
+WSGI_SERVER=gunicorn  # or 'uwsgi' (default)
+```
+
+**Implementation in piku.py:**
+```python
+def spawn_wsgi_worker(app, kind, workers, env):
+    wsgi_server = settings.get('WSGI_SERVER', 'uwsgi')
+
+    if wsgi_server == 'gunicorn':
+        return spawn_gunicorn_worker(app, kind, workers, env)
+    else:
+        return spawn_uwsgi_worker(app, kind, workers, env)
+
+def spawn_gunicorn_worker(app, kind, workers, env):
+    """Spawn a gunicorn worker process."""
+    sock = join(NGINX_ROOT, f"{app}.sock")
+    module = env.get('WSGI_MODULE', 'wsgi:app')
+
+    cmd = [
+        'gunicorn',
+        '--bind', f'unix:{sock}',
+        '--workers', str(workers),
+        '--access-logfile', join(LOG_ROOT, app, 'access.log'),
+        '--error-logfile', join(LOG_ROOT, app, 'error.log'),
+        '--pid', join(UWSGI_ROOT, f'{app}.pid'),
+        module
+    ]
+    return cmd
+```
+
+**Gunicorn advantages:**
+- Pure Python, installs cleanly with `pip install gunicorn`
+- No compilation required (unlike uwsgi)
+- Simpler configuration
+- Well-documented
+
+**Trade-offs vs uwsgi:**
+- No "Emperor" mode (need separate supervisor or launchd per-app)
+- Fewer protocol options (HTTP, Unix socket only)
+- No built-in cron support (use launchd instead)
+
+**Migration path:**
+- Phase 1: Add gunicorn support alongside uwsgi
+- Phase 2: Make gunicorn the default on macOS
+- Linux continues using uwsgi by default
+
+### 7. Shell Script Portability
 
 Update `uwsgi-piku.dist` CPU detection:
 
@@ -348,15 +401,53 @@ include /home/piku/.piku/nginx/*.conf;  # or use $PIKU_ROOT
 
 ### Phase 4: Installation & Documentation
 
-**Goal:** Complete macOS installation experience
+**Goal:** Complete macOS installation experience with Homebrew
 
 **Tasks:**
-1. Create Homebrew formula (optional, future)
+1. Create Homebrew formula for piku
 2. Write macOS-specific INSTALL guide
 3. Add macOS to CI testing matrix
 4. Update README with macOS support status
 
+**Homebrew Formula Design:**
+```ruby
+# Formula/piku.rb
+class Piku < Formula
+  desc "The tiniest PaaS you've ever seen"
+  homepage "https://github.com/piku/piku"
+  url "https://github.com/piku/piku/archive/refs/tags/v1.0.0.tar.gz"
+  license "MIT"
+
+  depends_on "nginx"
+  depends_on "python@3.11"
+
+  def install
+    # Install piku.py and supporting files
+    libexec.install "piku.py"
+    bin.install_symlink libexec/"piku.py" => "piku"
+
+    # Install launchd plists
+    (prefix/"LaunchDaemons").install Dir["macos/*.plist"]
+  end
+
+  def post_install
+    # Create piku user if not exists
+    system "dscl", ".", "-read", "/Users/piku" rescue
+      system "sudo", "sysadminctl", "-addUser", "piku", "-shell", "/bin/bash"
+  end
+
+  def caveats
+    <<~EOS
+      To complete installation:
+        sudo cp #{prefix}/LaunchDaemons/*.plist /Library/LaunchDaemons/
+        sudo launchctl load /Library/LaunchDaemons/com.piku.uwsgi.plist
+    EOS
+  end
+end
+```
+
 **Deliverables:**
+- `Formula/piku.rb` Homebrew formula
 - `INSTALL-macos.md` documentation
 - CI workflow for macOS
 - Updated README badges
@@ -444,27 +535,34 @@ jobs:
 
 ---
 
-## Open Questions
+## Design Decisions
 
-1. **User-level vs System-level?**
-   - Should piku run as a user-level launchd agent (`~/Library/LaunchAgents`) or system-level daemon (`/Library/LaunchDaemons`)?
-   - User-level is simpler but limits multi-user scenarios
+The following decisions have been made:
 
-2. **Homebrew Integration?**
-   - Should we publish a Homebrew formula for easy installation?
-   - Would require ongoing maintenance for version updates
+1. **System-level services** - Use `/Library/LaunchDaemons` for launchd plists
+   - Enables proper multi-user support
+   - Matches production Linux deployments
+   - Requires `sudo` for installation but runs as `piku` user
 
-3. **Docker for Mac Alternative?**
-   - Should we recommend Docker-based deployment on macOS instead?
-   - Trade-off: simplicity vs native performance
+2. **Homebrew formula** - Yes, publish to Homebrew
+   - `brew install piku` for easy installation
+   - Formula will handle dependencies (nginx, uwsgi/gunicorn)
+   - Tap at `piku/homebrew-piku` or submit to homebrew-core
 
-4. **Minimum macOS Version?**
-   - What's the minimum supported macOS version?
-   - Recommendation: macOS 12 (Monterey) or later for modern launchd features
+3. **Minimum macOS Version** - TBD during implementation
+   - Test on oldest available CI runners
+   - Document any version-specific requirements as discovered
 
-5. **uwsgi Installation?**
+4. **Alternative WSGI servers** - Support gunicorn as an alternative to uwsgi
    - uwsgi installation on macOS can be problematic
-   - Should we support alternative WSGI servers (gunicorn)?
+   - gunicorn is pure Python, installs cleanly via pip
+   - Add `WSGI_SERVER` config option: `uwsgi` (default) or `gunicorn`
+
+## Remaining Open Questions
+
+1. **Gunicorn integration details** - How to map uwsgi Emperor features to gunicorn?
+2. **Homebrew tap vs core** - Submit to homebrew-core or maintain our own tap?
+3. **CI runner availability** - Which macOS versions are available in GitHub Actions?
 
 ---
 
@@ -494,11 +592,13 @@ The phased approach allows incremental progress while maintaining stability for 
 
 | File | Change Type | Description |
 |------|-------------|-------------|
-| `piku.py` | Modify | Add platform detection, use abstraction layer |
+| `piku.py` | Modify | Add platform detection, gunicorn support, use abstraction layer |
 | `piku_platform.py` | New | Platform abstraction module |
-| `com.piku.uwsgi.plist` | New | launchd service for uwsgi |
-| `com.piku.nginx-reload.plist` | New | launchd service for nginx reload |
+| `macos/com.piku.uwsgi.plist` | New | launchd service for uwsgi |
+| `macos/com.piku.gunicorn.plist` | New | launchd service for gunicorn (alternative) |
+| `macos/com.piku.nginx-reload.plist` | New | launchd service for nginx reload |
 | `piku-setup-macos.sh` | New | macOS installation script |
+| `Formula/piku.rb` | New | Homebrew formula |
 | `INSTALL-macos.md` | New | macOS installation documentation |
 | `uwsgi-piku.dist` | Modify | Add portable shell commands |
 | `nginx.default.dist` | Modify | Support configurable paths |
